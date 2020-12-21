@@ -11,7 +11,9 @@
 07/MemoryAccess
 07/StackArithmetic
 07/**/*.exe
-08/*
+08/FunctionCalls
+08/ProgramFlow
+08/**/*.exe
 09/*
 10/*
 11/*
