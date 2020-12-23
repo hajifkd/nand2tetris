@@ -114,6 +114,7 @@ pub enum SegmentKind {
 enum Addr {
     Immediate(u16),
     Pointer(u16),
+    Dynamic,
 }
 
 impl SegmentKind {
@@ -121,7 +122,7 @@ impl SegmentKind {
         Some(match self {
             SegmentKind::Argument => Addr::Pointer(2),
             SegmentKind::Local => Addr::Pointer(1),
-            SegmentKind::Static => Addr::Immediate(16),
+            SegmentKind::Static => Addr::Dynamic,
             SegmentKind::Constant => return None,
             SegmentKind::This => Addr::Pointer(3),
             SegmentKind::That => Addr::Pointer(4),
@@ -157,8 +158,8 @@ pub struct Command {
 }
 
 impl Command {
-    pub fn generate(&self) -> Vec<Cow<'static, str>> {
-        self.kind.generate(self.line)
+    pub fn generate(&self, mod_name: &str) -> Vec<Cow<'static, str>> {
+        self.kind.generate(self.line, mod_name)
     }
 }
 
@@ -175,7 +176,7 @@ enum CommandKind {
     Call { name: String, n_arg: u16 },
 }
 
-fn generate_pop(segment: &SegmentKind, index: u16) -> Vec<Cow<'static, str>> {
+fn generate_pop(segment: &SegmentKind, index: u16, mod_name: &str) -> Vec<Cow<'static, str>> {
     let addr = segment.address();
     let mut result = ["@SP", "M=M-1", "A=M", "D=M"]
         .iter()
@@ -198,12 +199,16 @@ fn generate_pop(segment: &SegmentKind, index: u16) -> Vec<Cow<'static, str>> {
                     .map(|&s| s.into()),
             );
         }
+        Addr::Dynamic => {
+            result.push(format!("@${}.{}", mod_name, index).into());
+            result.push("M=D".into());
+        }
     }
 
     result
 }
 
-fn generate_push(segment: &SegmentKind, index: u16) -> Vec<Cow<'static, str>> {
+fn generate_push(segment: &SegmentKind, index: u16, mod_name: &str) -> Vec<Cow<'static, str>> {
     let mut result = Vec::<Cow<'static, str>>::new();
     if segment == &SegmentKind::Constant {
         result.push(format!("@{}", index).into());
@@ -213,10 +218,14 @@ fn generate_push(segment: &SegmentKind, index: u16) -> Vec<Cow<'static, str>> {
                 .map(|&s| s.into()),
         );
     } else {
-        let addr = segment.address();
-        match addr.unwrap() {
-            Addr::Immediate(n) => {
-                result.push(format!("@{}", n + index).into());
+        let addr = segment.address().unwrap();
+        match addr {
+            Addr::Immediate(_) | Addr::Dynamic => {
+                if let Addr::Immediate(n) = addr {
+                    result.push(format!("@{}", n + index).into());
+                } else {
+                    result.push(format!("@${}.{}", mod_name, index).into());
+                }
                 result.extend(
                     ["D=M", "@SP", "A=M", "M=D", "D=A", "@SP", "M=D+1"]
                         .iter()
@@ -244,7 +253,7 @@ fn generate_goto(label: &str) -> Vec<Cow<'static, str>> {
 }
 
 impl CommandKind {
-    fn generate(&self, line: usize) -> Vec<Cow<'static, str>> {
+    fn generate(&self, line: usize, mod_name: &str) -> Vec<Cow<'static, str>> {
         match &self {
             CommandKind::Initialize => vec![
                 "@261".into(), // 256 + 5
@@ -255,8 +264,8 @@ impl CommandKind {
                 "0;JMP".into(),
             ],
             CommandKind::Arithmetic(arithm) => arithm.generate(line),
-            CommandKind::Pop { segment, index } => generate_pop(segment, *index),
-            CommandKind::Push { segment, index } => generate_push(segment, *index),
+            CommandKind::Pop { segment, index } => generate_pop(segment, *index, mod_name),
+            CommandKind::Push { segment, index } => generate_push(segment, *index, mod_name),
             CommandKind::Label(label) => vec![format!("({})", label).into()],
             CommandKind::Goto(label) => generate_goto(&label),
             CommandKind::If(label) => vec![
@@ -282,7 +291,7 @@ impl CommandKind {
                     "@13".into(),
                     "M=D-1".into(),
                 ];
-                codes.extend(generate_push(&SegmentKind::Constant, 0));
+                codes.extend(generate_push(&SegmentKind::Constant, 0, mod_name));
                 codes.extend(generate_goto(&format!("$INT${}$1", line)));
                 codes.push(format!("($INT${}$2)", line).into());
                 codes
@@ -295,11 +304,11 @@ impl CommandKind {
                     "M=D".into(),
                 ];
 
-                codes.extend(generate_push(&SegmentKind::Internal, 0));
-                codes.extend(generate_push(&SegmentKind::Absolute, 1));
-                codes.extend(generate_push(&SegmentKind::Absolute, 2));
-                codes.extend(generate_push(&SegmentKind::Absolute, 3));
-                codes.extend(generate_push(&SegmentKind::Absolute, 4));
+                codes.extend(generate_push(&SegmentKind::Internal, 0, mod_name));
+                codes.extend(generate_push(&SegmentKind::Absolute, 1, mod_name));
+                codes.extend(generate_push(&SegmentKind::Absolute, 2, mod_name));
+                codes.extend(generate_push(&SegmentKind::Absolute, 3, mod_name));
+                codes.extend(generate_push(&SegmentKind::Absolute, 4, mod_name));
 
                 codes.extend(vec![
                     "@SP".into(),
@@ -335,11 +344,11 @@ impl CommandKind {
                     "M=D".into(),
                 ];
 
-                codes.extend(generate_pop(&SegmentKind::Absolute, 4)); // that
-                codes.extend(generate_pop(&SegmentKind::Absolute, 3)); // this
-                codes.extend(generate_pop(&SegmentKind::Absolute, 2)); // arg
-                codes.extend(generate_pop(&SegmentKind::Absolute, 1)); // lcl
-                codes.extend(generate_pop(&SegmentKind::Internal, 2)); // ret addr
+                codes.extend(generate_pop(&SegmentKind::Absolute, 4, mod_name)); // that
+                codes.extend(generate_pop(&SegmentKind::Absolute, 3, mod_name)); // this
+                codes.extend(generate_pop(&SegmentKind::Absolute, 2, mod_name)); // arg
+                codes.extend(generate_pop(&SegmentKind::Absolute, 1, mod_name)); // lcl
+                codes.extend(generate_pop(&SegmentKind::Internal, 2, mod_name)); // ret addr
 
                 codes.extend(vec![
                     "@14".into(),
@@ -471,6 +480,12 @@ impl<T: BufRead> Parser<T> {
             line: 0,
             initialized: false,
         }
+    }
+
+    pub fn load(&mut self, reader: T) -> Result<(), IlcError> {
+        self.reader = reader;
+        self.advance()?;
+        Ok(())
     }
 
     pub fn advance(&mut self) -> Result<Option<Command>, IlcError> {
